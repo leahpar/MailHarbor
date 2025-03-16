@@ -9,7 +9,7 @@
 
 ## Implémentation du serveur SMTP
 
-- [ ] Créer la commande console pour démarrer le serveur
+- [D] Créer la commande console pour démarrer le serveur
 - [ ] Implémenter le service d'écoute socket sur le port 25
 - [ ] Gérer les connexions entrantes et les timeouts
 - [ ] Implémenter le dialogue SMTP de base:
