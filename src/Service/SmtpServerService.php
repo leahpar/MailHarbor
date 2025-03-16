@@ -317,7 +317,17 @@ class SmtpServerService
             
             $this->log("Email received from client $clientId - From: $from, To: $to, Size: $dataSize bytes", 1);
             
-            // TODO: Store the email in the file system (this will be implemented in a future task)
+            // Store the email in the file system
+            $result = $this->storeEmail(
+                $from,
+                $this->clientStates[$clientId]['rcpt_to'],
+                $this->clientStates[$clientId]['data']
+            );
+            
+            if (!$result) {
+                $this->log("Error storing email from $from to $to", 0, 'error');
+                return "451 Requested action aborted: local error in processing\r\n";
+            }
             
             // Clear the email data after processing
             $this->clientStates[$clientId]['data'] = '';
@@ -439,5 +449,98 @@ class SmtpServerService
             
             $this->output->writeln($coloredMessage);
         }
+    }
+    
+    /**
+     * Store email data in the file system
+     *
+     * @param string $from Sender email address
+     * @param array $recipients Array of recipient email addresses
+     * @param string $data Email content
+     * @return bool True if the email was stored successfully
+     */
+    private function storeEmail(string $from, array $recipients, string $data): bool
+    {
+        try {
+            // Create base directory
+            $baseDir = __DIR__ . '/../../var/emails';
+            if (!is_dir($baseDir)) {
+                mkdir($baseDir, 0777, true);
+            }
+            
+            // Build email content
+            $emailContent = "";
+            
+            // Get timestamp for email
+            $timestamp = time();
+            $dateTime = date('Y-m-d_H-i-s', $timestamp);
+            
+            // Add metadata as headers
+            $emailContent .= "From: $from\r\n";
+            $emailContent .= "To: " . implode(', ', $recipients) . "\r\n";
+            $emailContent .= "Date: " . date('r', $timestamp) . "\r\n";
+            $emailContent .= "X-MailHarbor-Received: " . date('r', $timestamp) . "\r\n";
+            $emailContent .= "X-MailHarbor-From: $from\r\n";
+            
+            foreach ($recipients as $index => $recipient) {
+                $emailContent .= "X-MailHarbor-Recipient-" . ($index + 1) . ": $recipient\r\n";
+            }
+            
+            $emailContent .= "\r\n";
+            
+            // Add email content
+            $emailContent .= $data;
+            
+            // Store for each recipient
+            $stored = false;
+            
+            foreach ($recipients as $recipient) {
+                // Create a sanitized directory name for the recipient
+                $recipientDir = $baseDir . '/' . $this->sanitizeEmailForFilename($recipient);
+                
+                if (!is_dir($recipientDir)) {
+                    mkdir($recipientDir, 0777, true);
+                }
+                
+                // Create unique filename for this recipient
+                $uniqueId = substr(md5($from . $recipient . $timestamp), 0, 8);
+                $filename = $dateTime . '_' . $uniqueId . '.eml';
+                $filepath = $recipientDir . '/' . $filename;
+                
+                // Write to file
+                $bytes = file_put_contents($filepath, $emailContent);
+                
+                if ($bytes === false) {
+                    $this->log("Failed to write email to file: $filepath", 0, 'error');
+                } else {
+                    $this->log("Email for recipient $recipient stored in $filepath ($bytes bytes)", 2);
+                    $stored = true;
+                }
+            }
+            
+            if ($stored) {
+                $this->log("Email from $from to " . count($recipients) . " recipient(s) stored successfully", 1);
+                return true;
+            } else {
+                $this->log("Failed to store email to any recipient", 0, 'error');
+                return false;
+            }
+        } catch (\Exception $e) {
+            $this->log("Exception storing email: " . $e->getMessage(), 0, 'error');
+            return false;
+        }
+    }
+    
+    /**
+     * Sanitize an email address to use as a directory name
+     *
+     * @param string $email Email address
+     * @return string Sanitized name
+     */
+    private function sanitizeEmailForFilename(string $email): string
+    {
+        // Replace @ with _ and remove any characters not allowed in directory names
+        $sanitized = str_replace(['@', '.', '+'], ['_at_', '_dot_', '_plus_'], $email);
+        return preg_replace('/[^a-zA-Z0-9_-]/', '', $sanitized);
     }
 }
