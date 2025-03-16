@@ -96,15 +96,24 @@ class TestSmtpCommand extends Command
             $email .= "$message\r\n";
             $email .= ".\r\n"; // End of data marker
             
-            fwrite($socket, $email);
-            $response = $this->readResponse($socket);
+            $result = @fwrite($socket, $email);
+            if ($result === false) {
+                throw new \RuntimeException("Failed to send email data to server: " . error_get_last()['message'] ?? 'Unknown error');
+            }
+            
+            // Use a longer timeout for DATA response, which may take longer
+            $response = $this->readResponse($socket, 10);
             $io->text("Response: $response");
             
             // Send QUIT command
             $io->text('Sending QUIT command...');
-            fwrite($socket, "QUIT\r\n");
-            $response = $this->readResponse($socket);
-            $io->text("Response: $response");
+            $result = @fwrite($socket, "QUIT\r\n");
+            if ($result === false) {
+                $io->warning('Failed to send QUIT command, connection may already be closed');
+            } else {
+                $response = $this->readResponse($socket);
+                $io->text("Response: $response");
+            }
             
             // Close the connection
             fclose($socket);
@@ -124,13 +133,22 @@ class TestSmtpCommand extends Command
     
     /**
      * Read response from SMTP server
+     * 
+     * @param resource $socket The socket to read from
+     * @param int $timeout Optional timeout in seconds
+     * @return string The response
      */
-    private function readResponse($socket): string
+    private function readResponse($socket, int $timeout = 5): string
     {
+        // Set socket timeout if provided
+        if ($timeout > 0) {
+            stream_set_timeout($socket, $timeout);
+        }
+        
         $response = '';
         $line = '';
         
-        while (($line = fgets($socket, 515)) !== false) {
+        while (($line = @fgets($socket, 515)) !== false) {
             $response .= $line;
             
             // SMTP response ends with <CR><LF> and the 4th character
@@ -138,6 +156,16 @@ class TestSmtpCommand extends Command
             if (isset($line[3]) && $line[3] == ' ') {
                 break;
             }
+            
+            // Check if we timed out
+            $info = stream_get_meta_data($socket);
+            if ($info['timed_out']) {
+                break;
+            }
+        }
+        
+        if (empty($response)) {
+            return "(No response from server or connection closed)";
         }
         
         return trim($response);

@@ -182,8 +182,12 @@ class SmtpServerService
         $this->clientStates[$clientId] = [
             'connected_at' => time(),
             'last_activity' => time(),
-            'state' => 'new',
-            'ip' => $clientIp
+            'state' => 'command', // 'command' or 'data'
+            'ip' => $clientIp,
+            'hostname' => '',
+            'mail_from' => '',
+            'rcpt_to' => [],
+            'data' => ''
         ];
         
         $this->log("New client connected from $clientIp (ID: $clientId)", 1);
@@ -227,6 +231,13 @@ class SmtpServerService
                             continue;
                         }
                         
+                        // Check if we're in DATA mode and this is not the end marker
+                        if ($this->clientStates[$clientId]['state'] === 'data' && $command !== '.') {
+                            // In DATA mode, just accumulate the data
+                            $this->clientStates[$clientId]['data'] .= $command . "\r\n";
+                            continue;
+                        }
+                        
                         // Process SMTP command
                         $this->log("Received from client $clientId: $command", 2);
                         $response = $this->processSmtpCommand($clientId, $command);
@@ -249,24 +260,75 @@ class SmtpServerService
      */
     private function processSmtpCommand(string $clientId, string $command): string
     {
-        // For now just return a placeholder response based on the command
-        // This will be implemented in detail in the next task
-        
         // Convert command to uppercase for easier matching
         $commandUpper = strtoupper($command);
         
-        // Basic command handling placeholders
+        // Basic command handling
         if (strpos($commandUpper, 'QUIT') === 0) {
             $this->disconnectClient($clientId);
             return "221 Goodbye\r\n";
         }
         
         if (strpos($commandUpper, 'HELO') === 0 || strpos($commandUpper, 'EHLO') === 0) {
+            $hostname = substr($command, 5);
+            if (!empty($hostname)) {
+                $this->clientStates[$clientId]['hostname'] = trim($hostname);
+            }
             return "250 MailHarbor\r\n";
+        }
+        
+        if (strpos($commandUpper, 'MAIL FROM:') === 0) {
+            $sender = $this->extractEmail($command, 'MAIL FROM:');
+            $this->clientStates[$clientId]['mail_from'] = $sender;
+            return "250 OK\r\n";
+        }
+        
+        if (strpos($commandUpper, 'RCPT TO:') === 0) {
+            $recipient = $this->extractEmail($command, 'RCPT TO:');
+            if (!isset($this->clientStates[$clientId]['rcpt_to'])) {
+                $this->clientStates[$clientId]['rcpt_to'] = [];
+            }
+            $this->clientStates[$clientId]['rcpt_to'][] = $recipient;
+            return "250 OK\r\n";
+        }
+        
+        if (strpos($commandUpper, 'DATA') === 0) {
+            $this->clientStates[$clientId]['state'] = 'data';
+            return "354 Start mail input; end with <CRLF>.<CRLF>\r\n";
+        }
+        
+        // Handle DATA state separately
+        if ($this->clientStates[$clientId]['state'] === 'data' && $command === '.') {
+            $this->clientStates[$clientId]['state'] = 'command';
+            
+            // Extract information about the email
+            $from = $this->clientStates[$clientId]['mail_from'];
+            $to = implode(', ', $this->clientStates[$clientId]['rcpt_to']);
+            $dataSize = strlen($this->clientStates[$clientId]['data']);
+            
+            $this->log("Email received from client $clientId - From: $from, To: $to, Size: $dataSize bytes", 1);
+            
+            // TODO: Store the email in the file system (this will be implemented in a future task)
+            
+            // Clear the email data after processing
+            $this->clientStates[$clientId]['data'] = '';
+            
+            return "250 OK: message queued\r\n";
         }
         
         // Default response
         return "500 Command not recognized\r\n";
+    }
+    
+    /**
+     * Extract email address from SMTP command
+     */
+    private function extractEmail(string $command, string $prefix): string
+    {
+        $email = substr($command, strlen($prefix));
+        // Strip < and > if present
+        $email = trim(str_replace(['<', '>'], '', $email));
+        return $email;
     }
     
     /**
