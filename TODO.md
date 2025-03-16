@@ -3,9 +3,9 @@
 ## Configuration initiale
 
 - [D] Créer le squelette du projet Symfony (`symfony new <project name>`)
-- [ ] Configurer l'environnement de développement
-- [ ] Mettre en place le système de logs
-- [ ] Créer les fichiers de configuration spécifiques au projet
+- [D] Configurer l'environnement de développement
+- [D] Mettre en place le système de logs
+- [D] Créer les fichiers de configuration spécifiques au projet
 
 ## Implémentation du serveur SMTP
 
