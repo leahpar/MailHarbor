@@ -187,7 +187,8 @@ class SmtpServerService
             'hostname' => '',
             'mail_from' => '',
             'rcpt_to' => [],
-            'data' => ''
+            'data' => '',
+            'disconnect_after_response' => false
         ];
         
         $this->log("New client connected from $clientIp (ID: $clientId)", 1);
@@ -245,6 +246,12 @@ class SmtpServerService
                         // Send response to client
                         \socket_write($clientSocket, $response, strlen($response));
                         $this->log("Sent to client $clientId: $response", 2);
+                        
+                        // Check if client should be disconnected after this response
+                        if (isset($this->clientStates[$clientId]['disconnect_after_response']) && 
+                            $this->clientStates[$clientId]['disconnect_after_response'] === true) {
+                            $this->disconnectClient($clientId);
+                        }
                     }
                 }
             }
@@ -265,7 +272,9 @@ class SmtpServerService
         
         // Basic command handling
         if (strpos($commandUpper, 'QUIT') === 0) {
-            $this->disconnectClient($clientId);
+            // We need to return the response first, then disconnect the client
+            // The disconnect will happen after the response is sent
+            $this->clientStates[$clientId]['disconnect_after_response'] = true;
             return "221 Goodbye\r\n";
         }
         
