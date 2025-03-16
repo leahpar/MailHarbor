@@ -2,6 +2,10 @@
 
 Un serveur SMTP minimaliste développé en PHP avec Symfony pour la réception d'emails pour des domaines personnalisés.
 
+## IA
+
+Ce projet est réalisé en grande partie avec de l'IA (Claude Code). Pour le fun !
+
 ## Objectif du projet
 
 Créer un service simple permettant de recevoir des emails adressés à `*@votredomaine.com` et de les stocker localement. Ce projet est conçu pour être:
@@ -19,7 +23,7 @@ Créer un service simple permettant de recevoir des emails adressés à `*@votre
 ## Prérequis
 
 - PHP 8.0+
-- Symfony 6.x
+- Symfony 7.x
 - Extension socket PHP activée
 - Accès aux ports réseau (port 25 par défaut)
 - Enregistrement MX sur le domaine cible
