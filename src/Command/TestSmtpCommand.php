@@ -23,7 +23,8 @@ class TestSmtpCommand extends Command
             ->addOption('from', 'f', InputOption::VALUE_OPTIONAL, 'From email address', 'test@example.com')
             ->addOption('to', 't', InputOption::VALUE_OPTIONAL, 'To email address', 'recipient@example.com')
             ->addOption('subject', 's', InputOption::VALUE_OPTIONAL, 'Email subject', 'Test email from MailHarbor')
-            ->addOption('message', 'm', InputOption::VALUE_OPTIONAL, 'Email message', 'This is a test email sent from MailHarbor SMTP test command.');
+            ->addOption('message', 'm', InputOption::VALUE_OPTIONAL, 'Email message', 'This is a test email sent from MailHarbor SMTP test command.')
+            ->addOption('tls', null, InputOption::VALUE_NONE, 'Use STARTTLS to secure the connection');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -57,15 +58,53 @@ class TestSmtpCommand extends Command
             
             $io->text('Connected successfully');
             
+            // Set up stream options for debugging
+            stream_set_blocking($socket, true);
+            
             // Read the greeting
             $greeting = $this->readResponse($socket);
             $io->text("Server greeting: $greeting");
             
-            // Send HELO command
-            $io->text('Sending HELO command...');
-            fwrite($socket, "HELO mailharbor-test\r\n");
+            // Send EHLO command instead of HELO to check for STARTTLS support
+            $io->text('Sending EHLO command...');
+            fwrite($socket, "EHLO mailharbor-test\r\n");
             $response = $this->readResponse($socket);
             $io->text("Response: $response");
+            
+            // Check if we need to use TLS
+            $useTls = $input->getOption('tls');
+            $supportsTls = (strpos($response, "STARTTLS") !== false);
+            
+            if ($useTls) {
+                if (!$supportsTls) {
+                    $io->warning('STARTTLS requested but not supported by the server. Continuing without TLS.');
+                } else {
+                    $io->text('Server supports STARTTLS, initiating TLS handshake...');
+                    fwrite($socket, "STARTTLS\r\n");
+                    $response = $this->readResponse($socket);
+                    $io->text("Response: $response");
+                    
+                    // Check if the response is positive
+                    if (substr($response, 0, 3) === '220') {
+                        // Enable TLS on the connection
+                        $tlsResult = @stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT);
+                        
+                        if (!$tlsResult) {
+                            throw new \RuntimeException("Failed to enable TLS: " . (error_get_last()['message'] ?? 'Unknown error'));
+                        }
+                        
+                        $io->success('TLS encryption established');
+                        
+                        // We need to send EHLO again after STARTTLS
+                        $io->text('Sending EHLO command again after TLS...');
+                        fwrite($socket, "EHLO mailharbor-test\r\n");
+                        $response = $this->readResponse($socket);
+                        $io->text("Response: $response");
+                    } else {
+                        $io->warning('STARTTLS failed, continuing without TLS.');
+                    }
+                }
+            }
             
             // Send MAIL FROM command
             $io->text('Sending MAIL FROM command...');

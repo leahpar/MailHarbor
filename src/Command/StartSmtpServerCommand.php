@@ -31,7 +31,11 @@ class StartSmtpServerCommand extends Command
             ->addOption('host', null, InputOption::VALUE_OPTIONAL, 'Host to bind to', '0.0.0.0')
             ->addOption('timeout', 't', InputOption::VALUE_OPTIONAL, 'Connection timeout in seconds', 30)
             ->addOption('max-connections', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of simultaneous connections', 10)
-            ->addOption('debug', 'd', InputOption::VALUE_OPTIONAL, 'Debug level (0-3)', 1);
+            ->addOption('debug', 'd', InputOption::VALUE_OPTIONAL, 'Debug level (0-3)', 1)
+            ->addOption('tls', null, InputOption::VALUE_OPTIONAL, 'Enable TLS support (0=disabled, 1=enabled)', 1)
+            ->addOption('tls-cert', null, InputOption::VALUE_OPTIONAL, 'Path to TLS certificate file', __DIR__ . '/../../var/certs/certificate.crt')
+            ->addOption('tls-key', null, InputOption::VALUE_OPTIONAL, 'Path to TLS key file', __DIR__ . '/../../var/certs/private.key')
+            ->addOption('tls-passphrase', null, InputOption::VALUE_OPTIONAL, 'TLS certificate passphrase if needed');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -44,6 +48,10 @@ class StartSmtpServerCommand extends Command
             'timeout' => (int) $input->getOption('timeout'),
             'maxConnections' => (int) $input->getOption('max-connections'),
             'debug' => (int) $input->getOption('debug'),
+            'tls_enabled' => (bool) (int) $input->getOption('tls'),
+            'tls_cert_file' => $input->getOption('tls-cert'),
+            'tls_key_file' => $input->getOption('tls-key'),
+            'tls_passphrase' => $input->getOption('tls-passphrase'),
         ];
         
         // Set the output for direct console logging

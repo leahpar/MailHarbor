@@ -19,7 +19,12 @@ class SmtpServerService
         'maxConnections' => 10,
         'timeout' => 30,
         'debug' => 0, // 0 = minimal, 1 = normal, 2 = verbose, 3 = debug
+        'tls_enabled' => true,
+        'tls_cert_file' => __DIR__ . '/../../var/certs/certificate.crt',
+        'tls_key_file' => __DIR__ . '/../../var/certs/private.key',
+        'tls_passphrase' => null,
     ];
+    private $sslContext = null;
     private ?LoggerInterface $logger = null;
     private ?OutputInterface $output = null;
 
@@ -83,6 +88,11 @@ class SmtpServerService
         // Set socket to non-blocking mode for accept operations
         $this->log('Setting socket to non-blocking mode...', 2);
         \socket_set_nonblock($this->socket);
+        
+        // Set up SSL context for TLS if enabled
+        if ($this->config['tls_enabled']) {
+            $this->setUpSslContext();
+        }
         
         $this->isRunning = true;
         return true;
@@ -188,7 +198,9 @@ class SmtpServerService
             'mail_from' => '',
             'rcpt_to' => [],
             'data' => '',
-            'disconnect_after_response' => false
+            'disconnect_after_response' => false,
+            'tls' => false,
+            'upgrade_to_tls' => false
         ];
         
         $this->log("New client connected from $clientIp (ID: $clientId)", 1);
@@ -247,6 +259,12 @@ class SmtpServerService
                         \socket_write($clientSocket, $response, strlen($response));
                         $this->log("Sent to client $clientId: $response", 2);
                         
+                        // Check if we need to handle TLS upgrade
+                        if (isset($this->clientStates[$clientId]['upgrade_to_tls']) && 
+                            $this->clientStates[$clientId]['upgrade_to_tls'] === true) {
+                            $this->upgradeToTls($clientId);
+                        }
+                        
                         // Check if client should be disconnected after this response
                         if (isset($this->clientStates[$clientId]['disconnect_after_response']) && 
                             $this->clientStates[$clientId]['disconnect_after_response'] === true) {
@@ -278,12 +296,39 @@ class SmtpServerService
             return "221 Goodbye\r\n";
         }
         
-        if (strpos($commandUpper, 'HELO') === 0 || strpos($commandUpper, 'EHLO') === 0) {
+        if (strpos($commandUpper, 'EHLO') === 0) {
+            $hostname = substr($command, 5);
+            if (!empty($hostname)) {
+                $this->clientStates[$clientId]['hostname'] = trim($hostname);
+            }
+            
+            // Respond with capabilities, including STARTTLS if enabled
+            $response = "250-MailHarbor\r\n";
+            $response .= "250-SIZE 10240000\r\n"; // 10MB max message size
+            $response .= "250-8BITMIME\r\n";
+            
+            // Only advertise STARTTLS if TLS is enabled and we're not already in TLS mode
+            if ($this->config['tls_enabled'] && !$this->clientStates[$clientId]['tls']) {
+                $response .= "250-STARTTLS\r\n";
+            }
+            
+            $response .= "250 HELP\r\n";
+            return $response;
+        }
+        
+        if (strpos($commandUpper, 'HELO') === 0) {
             $hostname = substr($command, 5);
             if (!empty($hostname)) {
                 $this->clientStates[$clientId]['hostname'] = trim($hostname);
             }
             return "250 MailHarbor\r\n";
+        }
+        
+        // Handle STARTTLS command
+        if ($commandUpper === 'STARTTLS' && $this->config['tls_enabled'] && !$this->clientStates[$clientId]['tls']) {
+            // Mark this connection for TLS upgrade
+            $this->clientStates[$clientId]['upgrade_to_tls'] = true;
+            return "220 Ready to start TLS\r\n";
         }
         
         if (strpos($commandUpper, 'MAIL FROM:') === 0) {
@@ -528,6 +573,121 @@ class SmtpServerService
         } catch (\Exception $e) {
             $this->log("Exception storing email: " . $e->getMessage(), 0, 'error');
             return false;
+        }
+    }
+    
+    /**
+     * Set up SSL context for TLS encryption
+     */
+    private function setUpSslContext(): void
+    {
+        if (!extension_loaded('openssl')) {
+            $this->log('OpenSSL extension is not loaded. TLS will not be available.', 0, 'warning');
+            $this->config['tls_enabled'] = false;
+            return;
+        }
+        
+        // Check if certificate and key files are provided
+        if (empty($this->config['tls_cert_file']) || empty($this->config['tls_key_file'])) {
+            $this->log('SSL certificate or key file not provided. TLS will not be available.', 0, 'warning');
+            $this->config['tls_enabled'] = false;
+            return;
+        }
+        
+        // Check if certificate and key files exist
+        if (!file_exists($this->config['tls_cert_file']) || !file_exists($this->config['tls_key_file'])) {
+            $this->log('SSL certificate or key file not found at: ' . $this->config['tls_cert_file'] . ' or ' . $this->config['tls_key_file'], 0, 'warning');
+            $this->log('Creating empty certificate files as placeholders. Replace with real certificates for TLS to work.', 0, 'warning');
+            
+            // Create directories if they don't exist
+            $certDir = dirname($this->config['tls_cert_file']);
+            if (!is_dir($certDir)) {
+                mkdir($certDir, 0755, true);
+            }
+            
+            // Create empty files as placeholders
+            if (!file_exists($this->config['tls_cert_file'])) {
+                file_put_contents($this->config['tls_cert_file'], '');
+            }
+            if (!file_exists($this->config['tls_key_file'])) {
+                file_put_contents($this->config['tls_key_file'], '');
+            }
+            
+            $this->log('TLS will be advertised but will not work until proper certificates are provided.', 0, 'warning');
+            // We don't disable TLS here, it will just fail when clients try to use it
+        }
+        
+        // Create SSL context
+        $this->log('Setting up SSL context...', 1);
+        
+        $contextOptions = [
+            'ssl' => [
+                'local_cert' => $this->config['tls_cert_file'],
+                'local_pk' => $this->config['tls_key_file'],
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+                'allow_self_signed' => true,
+            ]
+        ];
+        
+        // Add passphrase if provided
+        if (!empty($this->config['tls_passphrase'])) {
+            $contextOptions['ssl']['passphrase'] = $this->config['tls_passphrase'];
+        }
+        
+        $this->sslContext = stream_context_create($contextOptions);
+        
+        $this->log('SSL context created successfully', 1);
+        $this->log('Using certificate file: ' . $this->config['tls_cert_file'], 2);
+        $this->log('Using key file: ' . $this->config['tls_key_file'], 2);
+    }
+    
+    /**
+     * Upgrade a client connection to TLS
+     */
+    private function upgradeToTls(string $clientId): void
+    {
+        if (!$this->config['tls_enabled'] || $this->sslContext === null) {
+            $this->log("TLS upgrade requested but TLS is not available", 0, 'warning');
+            return;
+        }
+        
+        $this->log("Upgrading client $clientId to TLS...", 1);
+        
+        try {
+            // Get the client socket
+            $clientSocket = $this->clients[$clientId];
+            
+            // Convert the socket resource to a stream
+            $stream = socket_export_stream($clientSocket);
+            if (!$stream) {
+                throw new \RuntimeException("Failed to export socket to stream");
+            }
+            
+            // Enable crypto on the stream
+            stream_context_set_option($stream, $this->sslContext->getOptions());
+            
+            if (!stream_socket_enable_crypto($stream, true, STREAM_CRYPTO_METHOD_TLS_SERVER)) {
+                $errorMessage = error_get_last()['message'] ?? 'Unknown error';
+                $this->log("TLS error: $errorMessage", 0, 'error');
+                throw new \RuntimeException("Failed to enable TLS encryption: $errorMessage");
+            }
+            
+            // Mark the client as using TLS
+            $this->clientStates[$clientId]['tls'] = true;
+            $this->clientStates[$clientId]['upgrade_to_tls'] = false;
+            
+            // Reset the client state - need to start with a new EHLO after STARTTLS
+            $this->clientBuffers[$clientId] = '';
+            $this->clientStates[$clientId]['mail_from'] = '';
+            $this->clientStates[$clientId]['rcpt_to'] = [];
+            $this->clientStates[$clientId]['data'] = '';
+            
+            $this->log("Successfully upgraded client $clientId to TLS", 1);
+            
+        } catch (\Exception $e) {
+            $this->log("Error upgrading to TLS: " . $e->getMessage(), 0, 'error');
+            $this->disconnectClient($clientId);
         }
     }
     
