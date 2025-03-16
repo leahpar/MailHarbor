@@ -2,10 +2,12 @@
 
 namespace App\Service;
 
+use Socket;
+
 class SmtpServerService
 {
     private bool $isRunning = false;
-    private $socket = null;
+    private mixed $socket;
     private array $clients = [];
     private array $clientBuffers = [];
     private array $clientStates = [];
@@ -37,26 +39,26 @@ class SmtpServerService
         $this->config = array_merge($this->config, $config);
         
         // Create a socket
-        $this->socket = @socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+        $this->socket = @\socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
         if ($this->socket === false) {
-            throw new \RuntimeException('Failed to create socket: ' . socket_strerror(socket_last_error()));
+            throw new \RuntimeException('Failed to create socket: ' . \socket_strerror(\socket_last_error()));
         }
         
         // Set socket options
-        socket_set_option($this->socket, SOL_SOCKET, SO_REUSEADDR, 1);
+        \socket_set_option($this->socket, SOL_SOCKET, SO_REUSEADDR, 1);
         
         // Bind the socket to an address/port
-        if (!@socket_bind($this->socket, $this->config['host'], $this->config['port'])) {
-            throw new \RuntimeException('Failed to bind socket: ' . socket_strerror(socket_last_error($this->socket)));
+        if (!@\socket_bind($this->socket, $this->config['host'], $this->config['port'])) {
+            throw new \RuntimeException('Failed to bind socket: ' . \socket_strerror(\socket_last_error($this->socket)));
         }
         
         // Start listening on the socket
-        if (!@socket_listen($this->socket, $this->config['maxConnections'])) {
-            throw new \RuntimeException('Failed to listen on socket: ' . socket_strerror(socket_last_error($this->socket)));
+        if (!@\socket_listen($this->socket, $this->config['maxConnections'])) {
+            throw new \RuntimeException('Failed to listen on socket: ' . \socket_strerror(\socket_last_error($this->socket)));
         }
         
         // Set socket to non-blocking mode for accept operations
-        socket_set_nonblock($this->socket);
+        \socket_set_nonblock($this->socket);
         
         $this->isRunning = true;
         return true;
@@ -74,14 +76,14 @@ class SmtpServerService
         // Close all client connections
         foreach ($this->clients as $client) {
             if (is_resource($client)) {
-                socket_close($client);
+                \socket_close($client);
             }
         }
         $this->clients = [];
         
         // Close the main server socket
         if ($this->socket !== null) {
-            socket_close($this->socket);
+            \socket_close($this->socket);
             $this->socket = null;
         }
         
@@ -136,7 +138,7 @@ class SmtpServerService
         }
         
         // Try to accept a new connection
-        $clientSocket = @socket_accept($this->socket);
+        $clientSocket = @\socket_accept($this->socket);
         
         // If no connection is waiting, socket_accept returns false in non-blocking mode
         if ($clientSocket === false) {
@@ -144,13 +146,13 @@ class SmtpServerService
         }
         
         // Set client socket to non-blocking mode
-        socket_set_nonblock($clientSocket);
+        \socket_set_nonblock($clientSocket);
         
         // Get client IP address
-        socket_getpeername($clientSocket, $clientIp);
+        \socket_getpeername($clientSocket, $clientIp);
         
         // Store the client socket and initialize its state
-        $clientId = (int) $clientSocket;
+        $clientId = uniqid('client_', true);
         $this->clients[$clientId] = $clientSocket;
         $this->clientBuffers[$clientId] = '';
         $this->clientStates[$clientId] = [
@@ -162,7 +164,7 @@ class SmtpServerService
         
         // Send greeting to client
         $greeting = "220 MailHarbor SMTP Service Ready\r\n";
-        socket_write($clientSocket, $greeting, strlen($greeting));
+        \socket_write($clientSocket, $greeting, strlen($greeting));
     }
     
     /**
@@ -173,7 +175,7 @@ class SmtpServerService
         foreach ($this->clients as $clientId => $clientSocket) {
             // Read available data from client (non-blocking)
             $buffer = '';
-            $bytes = @socket_recv($clientSocket, $buffer, 1024, 0);
+            $bytes = @\socket_recv($clientSocket, $buffer, 1024, 0);
             
             // Check if connection was closed or error occurred
             if ($bytes === 0 || $bytes === false) {
@@ -202,7 +204,7 @@ class SmtpServerService
                         $response = $this->processSmtpCommand($clientId, $command);
                         
                         // Send response to client
-                        socket_write($clientSocket, $response, strlen($response));
+                        \socket_write($clientSocket, $response, strlen($response));
                     }
                 }
             }
@@ -212,11 +214,11 @@ class SmtpServerService
     /**
      * Process a single SMTP command
      * 
-     * @param int $clientId The client ID
+     * @param string $clientId The client ID
      * @param string $command The SMTP command to process
      * @return string The response to send back to the client
      */
-    private function processSmtpCommand(int $clientId, string $command): string
+    private function processSmtpCommand(string $clientId, string $command): string
     {
         // For now just return a placeholder response based on the command
         // This will be implemented in detail in the next task
@@ -241,12 +243,12 @@ class SmtpServerService
     /**
      * Disconnect a client and clean up its resources
      * 
-     * @param int $clientId The client ID to disconnect
+     * @param string $clientId The client ID to disconnect
      */
-    private function disconnectClient(int $clientId): void
+    private function disconnectClient(string $clientId): void
     {
         if (isset($this->clients[$clientId])) {
-            socket_close($this->clients[$clientId]);
+            \socket_close($this->clients[$clientId]);
             unset($this->clients[$clientId]);
             unset($this->clientBuffers[$clientId]);
             unset($this->clientStates[$clientId]);
