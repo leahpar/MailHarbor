@@ -9,6 +9,7 @@
 - Run console command: `php bin/console <command-name>`
 
 ## Code Style Guidelines
+- **KISS**: Keep It Simple Stupid
 - **PHP Version**: 8.2+
 - **Namespaces**: Use `App\` namespace prefix
 - **PSR Standards**: Follow PSR-1, PSR-12, PSR-4

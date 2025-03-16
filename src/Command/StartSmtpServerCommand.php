@@ -47,16 +47,31 @@ class StartSmtpServerCommand extends Command
         $io->title('MailHarbor SMTP Server');
         $io->text([
             'Starting SMTP server on ' . $config['host'] . ':' . $config['port'],
-            'Press Ctrl+C to stop the server',
         ]);
 
         if ($this->smtpServer->start($config)) {
-            $io->success('SMTP server started successfully');
+            $io->text([
+                'SMTP server started successfully, listenning...',
+                'Press Ctrl+C to stop the server',
+                null,
+            ]);
+
+            // Set up signal handling for graceful shutdown
+            pcntl_async_signals(true);
+            pcntl_signal(SIGINT, function () use ($io) {
+                $io->note('Shutting down SMTP server...');
+                $this->smtpServer->stop();
+                $io->success('SMTP server stopped successfully');
+                exit(0);
+            });
             
-            // This will be replaced with an event loop to keep the command running
+            // Keep the command running until stopped
             while ($this->smtpServer->isRunning()) {
-                // Simple placeholder for the actual implementation
-                sleep(1);
+                // Process incoming connections and client data
+                $this->smtpServer->processConnections();
+                
+                // Small delay to prevent CPU usage spike
+                usleep(10000); // 10ms
             }
             
             return Command::SUCCESS;
