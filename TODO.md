@@ -2,7 +2,7 @@
 
 ## Configuration initiale
 
-- [ ] Créer le squelette du projet Symfony (`symfony new smtp-server-light --webapp`)
+- [D] Créer le squelette du projet Symfony (`symfony new <project name>`)
 - [ ] Configurer l'environnement de développement
 - [ ] Mettre en place le système de logs
 - [ ] Créer les fichiers de configuration spécifiques au projet
