@@ -3,6 +3,8 @@
 namespace App\Service;
 
 use Socket;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\Console\Output\OutputInterface;
 
 class SmtpServerService
 {
@@ -16,11 +18,22 @@ class SmtpServerService
         'host' => '0.0.0.0',
         'maxConnections' => 10,
         'timeout' => 30,
+        'debug' => 0, // 0 = minimal, 1 = normal, 2 = verbose, 3 = debug
     ];
+    private ?LoggerInterface $logger = null;
+    private ?OutputInterface $output = null;
 
-    public function __construct()
+    public function __construct(LoggerInterface $logger = null)
     {
-        // Constructor might receive logger and other dependencies later
+        $this->logger = $logger;
+    }
+    
+    /**
+     * Set console output for real-time logging
+     */
+    public function setOutput(OutputInterface $output): void
+    {
+        $this->output = $output;
     }
     
     /**
@@ -39,25 +52,36 @@ class SmtpServerService
         $this->config = array_merge($this->config, $config);
         
         // Create a socket
+        $this->log('Creating socket...', 1);
         $this->socket = @\socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
         if ($this->socket === false) {
-            throw new \RuntimeException('Failed to create socket: ' . \socket_strerror(\socket_last_error()));
+            $error = 'Failed to create socket: ' . \socket_strerror(\socket_last_error());
+            $this->log($error, 0, 'error');
+            throw new \RuntimeException($error);
         }
         
         // Set socket options
+        $this->log('Setting socket options...', 2);
         \socket_set_option($this->socket, SOL_SOCKET, SO_REUSEADDR, 1);
         
         // Bind the socket to an address/port
+        $this->log("Binding to {$this->config['host']}:{$this->config['port']}...", 1);
         if (!@\socket_bind($this->socket, $this->config['host'], $this->config['port'])) {
-            throw new \RuntimeException('Failed to bind socket: ' . \socket_strerror(\socket_last_error($this->socket)));
+            $error = 'Failed to bind socket: ' . \socket_strerror(\socket_last_error($this->socket));
+            $this->log($error, 0, 'error');
+            throw new \RuntimeException($error);
         }
         
         // Start listening on the socket
+        $this->log("Listening with max connections: {$this->config['maxConnections']}...", 1);
         if (!@\socket_listen($this->socket, $this->config['maxConnections'])) {
-            throw new \RuntimeException('Failed to listen on socket: ' . \socket_strerror(\socket_last_error($this->socket)));
+            $error = 'Failed to listen on socket: ' . \socket_strerror(\socket_last_error($this->socket));
+            $this->log($error, 0, 'error');
+            throw new \RuntimeException($error);
         }
         
         // Set socket to non-blocking mode for accept operations
+        $this->log('Setting socket to non-blocking mode...', 2);
         \socket_set_nonblock($this->socket);
         
         $this->isRunning = true;
@@ -162,9 +186,12 @@ class SmtpServerService
             'ip' => $clientIp
         ];
         
+        $this->log("New client connected from $clientIp (ID: $clientId)", 1);
+        
         // Send greeting to client
         $greeting = "220 MailHarbor SMTP Service Ready\r\n";
         \socket_write($clientSocket, $greeting, strlen($greeting));
+        $this->log("Sent to client $clientId: $greeting", 2);
     }
     
     /**
@@ -200,11 +227,13 @@ class SmtpServerService
                             continue;
                         }
                         
-                        // Process SMTP command (to be implemented)
+                        // Process SMTP command
+                        $this->log("Received from client $clientId: $command", 2);
                         $response = $this->processSmtpCommand($clientId, $command);
                         
                         // Send response to client
                         \socket_write($clientSocket, $response, strlen($response));
+                        $this->log("Sent to client $clientId: $response", 2);
                     }
                 }
             }
@@ -251,6 +280,10 @@ class SmtpServerService
             \socket_close($this->clients[$clientId]);
             unset($this->clients[$clientId]);
             unset($this->clientBuffers[$clientId]);
+            
+            $ip = $this->clientStates[$clientId]['ip'] ?? 'unknown';
+            $this->log("Client disconnected: $ip (ID: $clientId)", 1);
+            
             unset($this->clientStates[$clientId]);
         }
     }
@@ -264,10 +297,76 @@ class SmtpServerService
         $timeout = $this->config['timeout'];
         
         foreach ($this->clientStates as $clientId => $state) {
-            if ($now - $state['last_activity'] > $timeout) {
+            $inactiveTime = $now - $state['last_activity'];
+            if ($inactiveTime > $timeout) {
                 // This connection has timed out
+                $this->log("Client timeout after {$inactiveTime}s of inactivity: {$state['ip']} (ID: $clientId)", 1);
                 $this->disconnectClient($clientId);
             }
+        }
+    }
+    
+    /**
+     * Log a message to the logger and/or console output
+     *
+     * @param string $message The message to log
+     * @param int $level The debug level (0-3)
+     * @param string $type The type of message (info, error, etc.)
+     */
+    private function log(string $message, int $level = 0, string $type = 'info'): void
+    {
+        // Only log if debug level is high enough
+        if ($level > $this->config['debug']) {
+            return;
+        }
+        
+        // Add timestamp to message
+        $timestamp = date('Y-m-d H:i:s');
+        $formattedMessage = "[$timestamp] $message";
+        
+        // Log to logger if available
+        if ($this->logger !== null) {
+            switch ($type) {
+                case 'error':
+                    $this->logger->error($formattedMessage);
+                    break;
+                case 'warning':
+                    $this->logger->warning($formattedMessage);
+                    break;
+                case 'debug':
+                    $this->logger->debug($formattedMessage);
+                    break;
+                case 'info':
+                default:
+                    $this->logger->info($formattedMessage);
+                    break;
+            }
+        }
+        
+        // Output to console if available
+        if ($this->output !== null) {
+            $coloredMessage = $formattedMessage;
+            
+            // Add color based on type
+            switch ($type) {
+                case 'error':
+                    $coloredMessage = "<error>$formattedMessage</error>";
+                    break;
+                case 'warning':
+                    $coloredMessage = "<comment>$formattedMessage</comment>";
+                    break;
+                case 'debug':
+                    $coloredMessage = "<fg=cyan>$formattedMessage</fg=cyan>";
+                    break;
+                case 'info':
+                default:
+                    if ($level === 0) {
+                        $coloredMessage = "<info>$formattedMessage</info>";
+                    }
+                    break;
+            }
+            
+            $this->output->writeln($coloredMessage);
         }
     }
 }

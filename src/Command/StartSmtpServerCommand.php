@@ -30,7 +30,8 @@ class StartSmtpServerCommand extends Command
             ->addOption('port', 'p', InputOption::VALUE_OPTIONAL, 'Port to listen on', 25)
             ->addOption('host', null, InputOption::VALUE_OPTIONAL, 'Host to bind to', '0.0.0.0')
             ->addOption('timeout', 't', InputOption::VALUE_OPTIONAL, 'Connection timeout in seconds', 30)
-            ->addOption('max-connections', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of simultaneous connections', 10);
+            ->addOption('max-connections', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of simultaneous connections', 10)
+            ->addOption('debug', 'd', InputOption::VALUE_OPTIONAL, 'Debug level (0-3)', 1);
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -42,7 +43,11 @@ class StartSmtpServerCommand extends Command
             'host' => $input->getOption('host'),
             'timeout' => (int) $input->getOption('timeout'),
             'maxConnections' => (int) $input->getOption('max-connections'),
+            'debug' => (int) $input->getOption('debug'),
         ];
+        
+        // Set the output for direct console logging
+        $this->smtpServer->setOutput($output);
         
         $io->title('MailHarbor SMTP Server');
         $io->text([
