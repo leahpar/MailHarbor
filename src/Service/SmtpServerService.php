@@ -20,8 +20,8 @@ class SmtpServerService
         'timeout' => 30,
         'debug' => 0, // 0 = minimal, 1 = normal, 2 = verbose, 3 = debug
         'tls_enabled' => true,
-        'tls_cert_file' => __DIR__ . '/../../var/certs/certificate.crt',
-        'tls_key_file' => __DIR__ . '/../../var/certs/private.key',
+        'tls_cert_file' => __DIR__ . '/../../var/certs/cert.pem',
+        'tls_key_file' => __DIR__ . '/../../var/certs/privkey.pem',
         'tls_passphrase' => null,
     ];
     private $sslContext = null;
@@ -620,6 +620,21 @@ class SmtpServerService
         // Create SSL context
         $this->log('Setting up SSL context...', 1);
         
+        // Log the actual cert paths being used
+        $certFile = realpath($this->config['tls_cert_file']);
+        $keyFile = realpath($this->config['tls_key_file']);
+        
+        $this->log('Certificate file path: ' . $this->config['tls_cert_file'], 2);
+        $this->log('Certificate file exists: ' . (file_exists($this->config['tls_cert_file']) ? 'Yes' : 'No'), 2);
+        $this->log('Certificate resolved path: ' . ($certFile ?: 'Not found'), 2);
+        $this->log('Certificate file size: ' . (file_exists($this->config['tls_cert_file']) ? filesize($this->config['tls_cert_file']) . ' bytes' : 'N/A'), 2);
+        
+        $this->log('Key file path: ' . $this->config['tls_key_file'], 2);
+        $this->log('Key file exists: ' . (file_exists($this->config['tls_key_file']) ? 'Yes' : 'No'), 2);
+        $this->log('Key resolved path: ' . ($keyFile ?: 'Not found'), 2);
+        $this->log('Key file size: ' . (file_exists($this->config['tls_key_file']) ? filesize($this->config['tls_key_file']) . ' bytes' : 'N/A'), 2);
+        
+        // Use the correct paths in the SSL context
         $contextOptions = [
             'ssl' => [
                 'local_cert' => $this->config['tls_cert_file'],
@@ -627,6 +642,9 @@ class SmtpServerService
                 'verify_peer' => false,
                 'verify_peer_name' => false,
                 'allow_self_signed' => true,
+                'disable_compression' => true,
+                'SNI_enabled' => true,
+                'ciphers' => 'HIGH:!SSLv2:!SSLv3:!TLSv1.0',
             ]
         ];
         
@@ -638,8 +656,8 @@ class SmtpServerService
         $this->sslContext = stream_context_create($contextOptions);
         
         $this->log('SSL context created successfully', 1);
-        $this->log('Using certificate file: ' . $this->config['tls_cert_file'], 2);
-        $this->log('Using key file: ' . $this->config['tls_key_file'], 2);
+        $this->log('Using certificate file: ' . $this->config['tls_cert_file'], 1);
+        $this->log('Using key file: ' . $this->config['tls_key_file'], 1);
     }
     
     /**
@@ -659,18 +677,45 @@ class SmtpServerService
             $clientSocket = $this->clients[$clientId];
             
             // Convert the socket resource to a stream
-            $stream = socket_export_stream($clientSocket);
-            if (!$stream) {
-                throw new \RuntimeException("Failed to export socket to stream");
+            // socket_export_stream() function requires PHP 8.1+
+            if (function_exists('socket_export_stream')) {
+                $stream = socket_export_stream($clientSocket);
+                if (!$stream) {
+                    throw new \RuntimeException("Failed to export socket to stream");
+                }
+            } else {
+                // For older PHP versions
+                $this->log("socket_export_stream function not available, TLS upgrade may not work correctly", 0, 'warning');
+                throw new \RuntimeException("TLS upgrade not supported on this PHP version");
             }
             
             // Enable crypto on the stream
-            stream_context_set_option($stream, $this->sslContext->getOptions());
+            // We already have the context options applied when creating $this->sslContext
+            // No need to set options again, just use the existing stream
             
-            if (!stream_socket_enable_crypto($stream, true, STREAM_CRYPTO_METHOD_TLS_SERVER)) {
+            // Support multiple TLS protocol versions for better compatibility
+            $cryptoMethod = STREAM_CRYPTO_METHOD_TLS_SERVER;
+            if (defined('STREAM_CRYPTO_METHOD_TLSv1_2_SERVER')) {
+                $cryptoMethod |= STREAM_CRYPTO_METHOD_TLSv1_2_SERVER;
+            }
+            if (defined('STREAM_CRYPTO_METHOD_TLSv1_1_SERVER')) {
+                $cryptoMethod |= STREAM_CRYPTO_METHOD_TLSv1_1_SERVER;
+            }
+            
+            $this->log("Attempting TLS handshake with client $clientId", 2);
+            if (!stream_socket_enable_crypto($stream, true, $cryptoMethod)) {
                 $errorMessage = error_get_last()['message'] ?? 'Unknown error';
                 $this->log("TLS error: $errorMessage", 0, 'error');
                 throw new \RuntimeException("Failed to enable TLS encryption: $errorMessage");
+            }
+            
+            // Check if stream is still valid
+            $streamInfo = stream_get_meta_data($stream);
+            $this->log("Stream info after TLS handshake: " . json_encode($streamInfo), 2);
+            
+            if ($streamInfo['timed_out'] || $streamInfo['eof']) {
+                $this->log("Stream error after TLS handshake: timed_out={$streamInfo['timed_out']}, eof={$streamInfo['eof']}", 0, 'error');
+                throw new \RuntimeException("Stream error after TLS handshake");
             }
             
             // Mark the client as using TLS

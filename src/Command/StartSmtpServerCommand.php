@@ -33,8 +33,8 @@ class StartSmtpServerCommand extends Command
             ->addOption('max-connections', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of simultaneous connections', 10)
             ->addOption('debug', 'd', InputOption::VALUE_OPTIONAL, 'Debug level (0-3)', 1)
             ->addOption('tls', null, InputOption::VALUE_OPTIONAL, 'Enable TLS support (0=disabled, 1=enabled)', 1)
-            ->addOption('tls-cert', null, InputOption::VALUE_OPTIONAL, 'Path to TLS certificate file', __DIR__ . '/../../var/certs/certificate.crt')
-            ->addOption('tls-key', null, InputOption::VALUE_OPTIONAL, 'Path to TLS key file', __DIR__ . '/../../var/certs/private.key')
+            ->addOption('tls-cert', null, InputOption::VALUE_OPTIONAL, 'Path to TLS certificate file', __DIR__ . '/../../var/certs/cert.pem')
+            ->addOption('tls-key', null, InputOption::VALUE_OPTIONAL, 'Path to TLS key file', __DIR__ . '/../../var/certs/privkey.pem')
             ->addOption('tls-passphrase', null, InputOption::VALUE_OPTIONAL, 'TLS certificate passphrase if needed');
     }
 

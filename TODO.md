@@ -43,9 +43,8 @@
 
 ## Tests et débogage
 
-- [ ] Mettre en place des tests unitaires pour les composants principaux
-- [ ] Créer un environnement de test pour simuler des connexions SMTP
-- [ ] Implémenter des outils de débogage et de diagnostic
+- [D] Créer un environnement de test pour simuler des connexions SMTP
+- [D] Implémenter des outils de débogage et de diagnostic (logger pour l'instant)
 - [ ] Tester avec différents clients SMTP:
   - [ ] Thunderbird
   - [ ] Outlook
@@ -67,11 +66,10 @@
 
 ## Améliorations futures (optionnel)
 
-- [ ] Support TLS (STARTTLS)
+- [D] Support TLS (STARTTLS)
 - [ ] Interface web simple pour consulter les emails
 - [ ] Filtrage de base pour le spam
 - [ ] Règles de routage selon les destinataires
-- [ ] Système de notification pour les nouveaux emails
 
 ## Notes et ressources
 

@@ -86,11 +86,51 @@ class TestSmtpCommand extends Command
                     
                     // Check if the response is positive
                     if (substr($response, 0, 3) === '220') {
-                        // Enable TLS on the connection
-                        $tlsResult = @stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT);
+                        // Enable TLS on the connection with better compatibility
+                        $cryptoMethod = STREAM_CRYPTO_METHOD_TLS_CLIENT;
+                        
+                        // Add support for different TLS versions
+                        if (defined('STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT')) {
+                            $cryptoMethod |= STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT;
+                        }
+                        if (defined('STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT')) {
+                            $cryptoMethod |= STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT;
+                        }
+                        
+                        $io->text('Starting TLS handshake with crypto method: ' . $cryptoMethod);
+                        
+                        // Remove @ to actually see errors
+                        stream_set_blocking($socket, true);
+                        stream_set_timeout($socket, 30); // Increase timeout for TLS handshake
+                        
+                        // Debug information before handshake
+                        $io->text('Debug: Stream state before TLS - ' . json_encode(stream_get_meta_data($socket)));
+                        
+                        // Try TLS handshake with more debug info
+                        // Set verbose debug mode
+                        $GLOBALS['debug_tls'] = true;
+                        
+                        // Try TLS handshake
+                        $tlsResult = stream_socket_enable_crypto($socket, true, $cryptoMethod);
+                        
+                        // Reset debug mode
+                        $GLOBALS['debug_tls'] = false;
                         
                         if (!$tlsResult) {
-                            throw new \RuntimeException("Failed to enable TLS: " . (error_get_last()['message'] ?? 'Unknown error'));
+                            $error = error_get_last();
+                            $errorMsg = $error ? $error['message'] : 'Unknown error';
+                            $io->error("TLS handshake failed: $errorMsg");
+                            
+                            // Show more debug info
+                            $io->text('Debug: Stream state after failed TLS - ' . json_encode(stream_get_meta_data($socket)));
+                            
+                            // Try to read any error response from server
+                            $errorResponse = @fgets($socket, 1024);
+                            if ($errorResponse) {
+                                $io->text("Server response after TLS failure: $errorResponse");
+                            }
+                            
+                            throw new \RuntimeException("Failed to enable TLS: $errorMsg");
                         }
                         
                         $io->success('TLS encryption established');
@@ -187,7 +227,15 @@ class TestSmtpCommand extends Command
         $response = '';
         $line = '';
         
-        while (($line = @fgets($socket, 515)) !== false) {
+        // Check if socket is still valid
+        if (!is_resource($socket) || feof($socket)) {
+            return "(Socket closed or not available)";
+        }
+        
+        // More debugging
+        $metaBeforeRead = stream_get_meta_data($socket);
+        
+        while (($line = fgets($socket, 515)) !== false) {
             $response .= $line;
             
             // SMTP response ends with <CR><LF> and the 4th character
@@ -199,12 +247,19 @@ class TestSmtpCommand extends Command
             // Check if we timed out
             $info = stream_get_meta_data($socket);
             if ($info['timed_out']) {
+                $response .= "(Read timeout occurred)";
                 break;
             }
         }
         
+        // Get socket status after read
+        $metaAfterRead = stream_get_meta_data($socket);
+        
         if (empty($response)) {
-            return "(No response from server or connection closed)";
+            // More detailed error information when no response
+            $errorInfo = "Stream state before: " . json_encode($metaBeforeRead) . 
+                         ", after: " . json_encode($metaAfterRead);
+            return "(No response from server or connection closed. $errorInfo)";
         }
         
         return trim($response);
