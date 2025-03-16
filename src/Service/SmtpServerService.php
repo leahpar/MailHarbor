@@ -360,8 +360,7 @@ class SmtpServerService
             }
         }
     }
-    }
-    
+
     /**
      * Process a single SMTP command
      * 
@@ -505,10 +504,15 @@ class SmtpServerService
                 $this->log("Closing TLS stream for client $clientId", 2);
                 @fclose($this->clientStreams[$clientId]);
                 unset($this->clientStreams[$clientId]);
+                
+                // Note: Une fois le stream fermé, le socket sous-jacent est également fermé
+                // Nous n'avons pas besoin de fermer explicitement le socket
+                $this->log("Socket automatically closed via stream closure for client $clientId", 2);
+            } else {
+                // Close the socket only if no stream was used
+                $this->log("Closing socket for client $clientId", 2);
+                @\socket_close($this->clients[$clientId]);
             }
-            
-            // Close the socket
-            \socket_close($this->clients[$clientId]);
             
             // Log detailed disconnect information
             $this->log("Client disconnected: $ip (ID: $clientId)", 1);
