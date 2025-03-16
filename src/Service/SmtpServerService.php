@@ -299,7 +299,13 @@ class SmtpServerService
                 $this->clientStates[$clientId]['last_activity'] = time();
                 
                 // Afficher les données brutes reçues pour débogage
-                $this->log("Raw data received from client $clientId: " . bin2hex($buffer), 3);
+                $isData = isset($this->clientStates[$clientId]['state']) && $this->clientStates[$clientId]['state'] === 'data';
+                $this->log("Raw data received from client $clientId: " . bin2hex($buffer) . ($isData ? " (DATA mode)" : ""), 3);
+                
+                // Débogage spécial pour le mode DATA
+                if ($isData) {
+                    $this->log("DATA content received from client $clientId (" . strlen($buffer) . " bytes): " . substr($buffer, 0, 100) . (strlen($buffer) > 100 ? "..." : ""), 2);
+                }
                 
                 // Check if we have a complete command (ending with CR+LF)
                 if (strpos($this->clientBuffers[$clientId], "\r\n") !== false) {

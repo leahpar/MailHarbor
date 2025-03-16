@@ -99,10 +99,21 @@ class SendExternalSmtpCommand extends Command
             $mail = new PHPMailer(true);
             
             // Set debug level
-            $mail->SMTPDebug = $debugLevel;
+            $mail->SMTPDebug = $debugLevel; // 0=off, 1=client, 2=client/server, 3=more details, 4=full trace
             $mail->Debugoutput = function($str, $level) use ($io) {
-                $io->text("<fg=gray>[$level] $str</>");
+                $level_color = match($level) {
+                    1 => 'cyan',
+                    2 => 'green',
+                    3 => 'yellow',
+                    4 => 'red',
+                    default => 'gray'
+                };
+                $io->text("<fg=$level_color>[$level] $str</>");
             };
+            
+            // Enable a "keep-alive" setting if available
+            $mail->Timeout = 60; // Timeout in seconds
+            $mail->SMTPKeepAlive = true; // Keep connection open after sending
             
             // Set up SMTP
             $io->text('Setting up SMTP connection...');
