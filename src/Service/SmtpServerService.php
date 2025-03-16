@@ -13,6 +13,7 @@ class SmtpServerService
     private array $clients = [];
     private array $clientBuffers = [];
     private array $clientStates = [];
+    private array $clientStreams = []; // Pour stocker les streams TLS
     private array $config = [
         'port' => 25,
         'host' => '0.0.0.0',
@@ -217,43 +218,88 @@ class SmtpServerService
     private function handleClientData(): void
     {
         foreach ($this->clients as $clientId => $clientSocket) {
-            // Read available data from client (non-blocking)
+            // Déterminer si ce client utilise TLS
+            $usingTls = isset($this->clientStates[$clientId]['tls']) && $this->clientStates[$clientId]['tls'] === true;
+            
+            // Lire les données du client, de manière différente selon que TLS est utilisé ou non
             $buffer = '';
-            $bytes = @\socket_recv($clientSocket, $buffer, 1024, 0);
+            $bytes = 0;
             
-            // Get the error code for better diagnosis
-            $error = socket_last_error($clientSocket);
-            $errorMsg = $error ? socket_strerror($error) : 'None';
-            
-            // EAGAIN/EWOULDBLOCK (11/140) means no data available on non-blocking socket
-            // This is not an error, just means we should try again later
-            $eagain = defined('SOCKET_EAGAIN') ? SOCKET_EAGAIN : 11;
-            $ewouldblock = defined('SOCKET_EWOULDBLOCK') ? SOCKET_EWOULDBLOCK : 140;
-            
-            // Check if connection was closed or a real error occurred
-            if ($bytes === 0) {
-                // Connection closed gracefully
-                $clientState = isset($this->clientStates[$clientId]) ? json_encode($this->clientStates[$clientId]) : 'unknown';
-                $this->log("Client disconnection detected (graceful close): bytes=$bytes, error=$errorMsg, state=$clientState", 1, 'warning');
-                $this->disconnectClient($clientId);
-                continue;
-            } else if ($bytes === false && $error !== $eagain && $error !== $ewouldblock) {
-                // Real error (not just "would block")
-                $clientState = isset($this->clientStates[$clientId]) ? json_encode($this->clientStates[$clientId]) : 'unknown';
-                $this->log("Client disconnection detected (error): bytes=$bytes, error=$errorMsg ($error), state=$clientState", 1, 'warning');
-                $this->disconnectClient($clientId);
-                continue;
-            } else if ($bytes === false) {
-                // No data available on non-blocking socket (not an error)
-                // Reset the socket error status
-                socket_clear_error($clientSocket);
-                continue;
+            if ($usingTls && isset($this->clientStreams[$clientId])) {
+                // Utiliser le stream pour les clients TLS
+                $stream = $this->clientStreams[$clientId];
+                
+                // Vérifier si le stream est lisible
+                $read = [$stream];
+                $write = null;
+                $except = null;
+                $streamSelect = stream_select($read, $write, $except, 0, 0);
+                
+                if ($streamSelect === false) {
+                    $this->log("Stream select error for client $clientId", 1, 'warning');
+                    $this->disconnectClient($clientId);
+                    continue;
+                } elseif ($streamSelect > 0) {
+                    // Données disponibles, lire du stream
+                    $buffer = fread($stream, 1024);
+                    $bytes = strlen($buffer);
+                    
+                    // Vérifier l'état du stream
+                    $streamInfo = stream_get_meta_data($stream);
+                    
+                    if ($streamInfo['eof']) {
+                        $this->log("TLS stream EOF for client $clientId", 1, 'warning');
+                        $this->disconnectClient($clientId);
+                        continue;
+                    }
+                    
+                    if ($streamInfo['timed_out']) {
+                        $this->log("TLS stream timeout for client $clientId", 1, 'warning');
+                        // On ne déconnecte pas nécessairement ici, juste un warning
+                    }
+                }
+                // Si streamSelect est 0, pas de données disponibles
+            } else {
+                // Méthode standard non-TLS
+                $bytes = @\socket_recv($clientSocket, $buffer, 1024, 0);
+                
+                // Get the error code for better diagnosis
+                $error = socket_last_error($clientSocket);
+                $errorMsg = $error ? socket_strerror($error) : 'None';
+                
+                // EAGAIN/EWOULDBLOCK (11/140) means no data available on non-blocking socket
+                // This is not an error, just means we should try again later
+                $eagain = defined('SOCKET_EAGAIN') ? SOCKET_EAGAIN : 11;
+                $ewouldblock = defined('SOCKET_EWOULDBLOCK') ? SOCKET_EWOULDBLOCK : 140;
+                
+                // Check if connection was closed or a real error occurred
+                if ($bytes === 0) {
+                    // Connection closed gracefully
+                    $clientState = isset($this->clientStates[$clientId]) ? json_encode($this->clientStates[$clientId]) : 'unknown';
+                    $this->log("Client disconnection detected (graceful close): bytes=$bytes, error=$errorMsg, state=$clientState", 1, 'warning');
+                    $this->disconnectClient($clientId);
+                    continue;
+                } else if ($bytes === false && $error !== $eagain && $error !== $ewouldblock) {
+                    // Real error (not just "would block")
+                    $clientState = isset($this->clientStates[$clientId]) ? json_encode($this->clientStates[$clientId]) : 'unknown';
+                    $this->log("Client disconnection detected (error): bytes=$bytes, error=$errorMsg ($error), state=$clientState", 1, 'warning');
+                    $this->disconnectClient($clientId);
+                    continue;
+                } else if ($bytes === false) {
+                    // No data available on non-blocking socket (not an error)
+                    // Reset the socket error status
+                    socket_clear_error($clientSocket);
+                    continue;
+                }
             }
             
             // If we received data, process it
             if ($bytes > 0) {
                 $this->clientBuffers[$clientId] .= $buffer;
                 $this->clientStates[$clientId]['last_activity'] = time();
+                
+                // Afficher les données brutes reçues pour débogage
+                $this->log("Raw data received from client $clientId: " . bin2hex($buffer), 3);
                 
                 // Check if we have a complete command (ending with CR+LF)
                 if (strpos($this->clientBuffers[$clientId], "\r\n") !== false) {
@@ -277,8 +323,25 @@ class SmtpServerService
                         $this->log("Received from client $clientId: $command", 2);
                         $response = $this->processSmtpCommand($clientId, $command);
                         
-                        // Send response to client
-                        \socket_write($clientSocket, $response, strlen($response));
+                        // Envoyer la réponse de manière appropriée selon TLS ou non
+                        if ($usingTls && isset($this->clientStreams[$clientId])) {
+                            $result = @fwrite($this->clientStreams[$clientId], $response);
+                            if ($result === false) {
+                                $this->log("Failed to write response to TLS stream for client $clientId", 0, 'error');
+                                $this->disconnectClient($clientId);
+                                continue;
+                            }
+                        } else {
+                            $result = @\socket_write($clientSocket, $response, strlen($response));
+                            if ($result === false) {
+                                $error = socket_last_error($clientSocket);
+                                $errorMsg = socket_strerror($error);
+                                $this->log("Failed to write response to socket for client $clientId: $errorMsg", 0, 'error');
+                                $this->disconnectClient($clientId);
+                                continue;
+                            }
+                        }
+                        
                         $this->log("Sent to client $clientId: $response", 2);
                         
                         // Check if we need to handle TLS upgrade
@@ -296,6 +359,7 @@ class SmtpServerService
                 }
             }
         }
+    }
     }
     
     /**
@@ -435,6 +499,13 @@ class SmtpServerService
             // Get socket error if any
             $error = @socket_last_error($this->clients[$clientId]);
             $errorMsg = $error ? socket_strerror($error) : 'None';
+            
+            // Fermer le stream TLS si existant
+            if (isset($this->clientStreams[$clientId])) {
+                $this->log("Closing TLS stream for client $clientId", 2);
+                @fclose($this->clientStreams[$clientId]);
+                unset($this->clientStreams[$clientId]);
+            }
             
             // Close the socket
             \socket_close($this->clients[$clientId]);
@@ -660,15 +731,15 @@ class SmtpServerService
         $certFile = realpath($this->config['tls_cert_file']);
         $keyFile = realpath($this->config['tls_key_file']);
         
-        $this->log('Certificate file path: ' . $this->config['tls_cert_file'], 2);
-        $this->log('Certificate file exists: ' . (file_exists($this->config['tls_cert_file']) ? 'Yes' : 'No'), 2);
-        $this->log('Certificate resolved path: ' . ($certFile ?: 'Not found'), 2);
-        $this->log('Certificate file size: ' . (file_exists($this->config['tls_cert_file']) ? filesize($this->config['tls_cert_file']) . ' bytes' : 'N/A'), 2);
+        $this->log('Certificate file path: ' . $this->config['tls_cert_file'], 1);
+        $this->log('Certificate file exists: ' . (file_exists($this->config['tls_cert_file']) ? 'Yes' : 'No'), 1);
+        $this->log('Certificate resolved path: ' . ($certFile ?: 'Not found'), 1);
+        $this->log('Certificate file size: ' . (file_exists($this->config['tls_cert_file']) ? filesize($this->config['tls_cert_file']) . ' bytes' : 'N/A'), 1);
         
-        $this->log('Key file path: ' . $this->config['tls_key_file'], 2);
-        $this->log('Key file exists: ' . (file_exists($this->config['tls_key_file']) ? 'Yes' : 'No'), 2);
-        $this->log('Key resolved path: ' . ($keyFile ?: 'Not found'), 2);
-        $this->log('Key file size: ' . (file_exists($this->config['tls_key_file']) ? filesize($this->config['tls_key_file']) . ' bytes' : 'N/A'), 2);
+        $this->log('Key file path: ' . $this->config['tls_key_file'], 1);
+        $this->log('Key file exists: ' . (file_exists($this->config['tls_key_file']) ? 'Yes' : 'No'), 1);
+        $this->log('Key resolved path: ' . ($keyFile ?: 'Not found'), 1);
+        $this->log('Key file size: ' . (file_exists($this->config['tls_key_file']) ? filesize($this->config['tls_key_file']) . ' bytes' : 'N/A'), 1);
         
         // Use the correct paths in the SSL context
         $contextOptions = [
@@ -684,6 +755,50 @@ class SmtpServerService
                 'ciphers' => 'ALL:!ADH:!NULL:!eNULL:!LOW:!EXP:!RC4:!MD5:@STRENGTH',
             ]
         ];
+        
+        // Vérifier le contenu des certificats
+        if (file_exists($this->config['tls_cert_file']) && file_exists($this->config['tls_key_file'])) {
+            $certContent = file_get_contents($this->config['tls_cert_file']);
+            $keyContent = file_get_contents($this->config['tls_key_file']);
+            
+            // Vérifier les formats de certificats - ils peuvent commencer par différents headers
+            $validCertHeaders = [
+                '-----BEGIN CERTIFICATE-----',
+                '-----BEGIN X509 CERTIFICATE-----',
+                '-----BEGIN TRUSTED CERTIFICATE-----'
+            ];
+            
+            $validKeyHeaders = [
+                '-----BEGIN PRIVATE KEY-----', 
+                '-----BEGIN RSA PRIVATE KEY-----',
+                '-----BEGIN DSA PRIVATE KEY-----',
+                '-----BEGIN EC PRIVATE KEY-----'
+            ];
+            
+            $certValid = false;
+            foreach ($validCertHeaders as $header) {
+                if (str_contains($certContent, $header)) {
+                    $certValid = true;
+                    $this->log("Certificate has valid header: $header", 1);
+                    break;
+                }
+            }
+            
+            $keyValid = false;
+            foreach ($validKeyHeaders as $header) {
+                if (str_contains($keyContent, $header)) {
+                    $keyValid = true;
+                    $this->log("Private key has valid header: $header", 1);
+                    break;
+                }
+            }
+            
+            if (!$certValid || !$keyValid) {
+                $this->log("WARNING: Certificate or key files appear to be invalid", 0, 'warning');
+                if (!$certValid) $this->log("Certificate file does not contain a valid certificate header", 0, 'warning');
+                if (!$keyValid) $this->log("Private key file does not contain a valid key header", 0, 'warning');
+            }
+        }
         
         // Add passphrase if provided
         if (!empty($this->config['tls_passphrase'])) {
@@ -716,9 +831,34 @@ class SmtpServerService
             // Convert the socket resource to a stream
             // socket_export_stream() function requires PHP 8.1+
             if (function_exists('socket_export_stream')) {
+                // Log socket info avant conversion
+                $this->log("Socket object type: " . (is_object($clientSocket) ? get_class($clientSocket) : gettype($clientSocket)), 2);
+                
+                // Skip socket option check as we know we set it to non-blocking earlier
+                $this->log("Socket was set to non-blocking mode in acceptNewConnections()", 2);
+                
+                // Convertir en stream
                 $stream = socket_export_stream($clientSocket);
                 if (!$stream) {
                     throw new \RuntimeException("Failed to export socket to stream");
+                }
+                
+                // Log stream info après conversion
+                if (is_resource($stream)) {
+                    $this->log("Stream resource type: " . get_resource_type($stream), 2);
+                } else {
+                    $this->log("Stream is not a resource but " . gettype($stream), 2);
+                }
+                
+                try {
+                    $streamMetaData = stream_get_meta_data($stream);
+                    $this->log("Stream metadata: " . json_encode($streamMetaData), 2);
+                    
+                    // Configurer le stream pour TLS
+                    stream_set_blocking($stream, true); // Important pour TLS handshake
+                    $this->log("Stream set to blocking mode for TLS handshake", 2);
+                } catch (\Exception $e) {
+                    $this->log("Stream configuration error: " . $e->getMessage(), 2, 'error');
                 }
             } else {
                 // For older PHP versions
@@ -762,8 +902,116 @@ class SmtpServerService
             $this->log("Final crypto method value: $cryptoMethod", 2);
             
             $this->log("Attempting TLS handshake with client $clientId", 2);
+            
+            // Vérifier si les certificats existent et ont le bon contenu
+            if (!file_exists($this->config['tls_cert_file'])) {
+                $this->log("Certificate file not found: {$this->config['tls_cert_file']}", 0, 'error');
+                throw new \RuntimeException("Certificate file not found");
+            }
+            
+            if (!file_exists($this->config['tls_key_file'])) {
+                $this->log("Private key file not found: {$this->config['tls_key_file']}", 0, 'error');
+                throw new \RuntimeException("Private key file not found");
+            }
+            
+            // Vérifier le contenu des certificats
+            $certContent = file_get_contents($this->config['tls_cert_file']);
+            $keyContent = file_get_contents($this->config['tls_key_file']);
+            
+            $this->log("Certificate file size: " . strlen($certContent) . " bytes", 2);
+            $this->log("Private key file size: " . strlen($keyContent) . " bytes", 2);
+            
+            // Vérifier les formats de certificats - ils peuvent commencer par différents headers
+            $validCertHeaders = [
+                '-----BEGIN CERTIFICATE-----',
+                '-----BEGIN X509 CERTIFICATE-----',
+                '-----BEGIN TRUSTED CERTIFICATE-----'
+            ];
+            
+            $validKeyHeaders = [
+                '-----BEGIN PRIVATE KEY-----', 
+                '-----BEGIN RSA PRIVATE KEY-----',
+                '-----BEGIN DSA PRIVATE KEY-----',
+                '-----BEGIN EC PRIVATE KEY-----'
+            ];
+            
+            $certValid = false;
+            foreach ($validCertHeaders as $header) {
+                if (str_contains($certContent, $header)) {
+                    $certValid = true;
+                    $this->log("Certificate has valid header: $header", 2);
+                    break;
+                }
+            }
+            
+            if (!$certContent || !$certValid) {
+                $this->log("Invalid certificate file content", 0, 'error');
+                throw new \RuntimeException("Invalid certificate file content");
+            }
+            
+            $keyValid = false;
+            foreach ($validKeyHeaders as $header) {
+                if (str_contains($keyContent, $header)) {
+                    $keyValid = true;
+                    $this->log("Private key has valid header: $header", 2);
+                    break;
+                }
+            }
+            
+            if (!$keyContent || !$keyValid) {
+                $this->log("Invalid private key file content", 0, 'error');
+                throw new \RuntimeException("Invalid private key file content");
+            }
+            
+            // Activer le débogage OpenSSL 
+            if (function_exists('openssl_get_errors')) {
+                openssl_get_errors(); // Vider les erreurs précédentes
+            }
+            
+            // Créer un contexte SSL spécifique pour ce stream
+            $sslOptions = [
+                'local_cert' => $this->config['tls_cert_file'],
+                'local_pk' => $this->config['tls_key_file'],
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+                'allow_self_signed' => true,
+                'disable_compression' => true,
+                'ciphers' => 'ALL:!ADH:!NULL:!eNULL:!LOW:!EXP:!RC4:!MD5:@STRENGTH',
+            ];
+            
+            if (!empty($this->config['tls_passphrase'])) {
+                $sslOptions['passphrase'] = $this->config['tls_passphrase'];
+            }
+            
+            // Créer le contexte directement pour ce stream
+            $streamContext = stream_context_create(['ssl' => $sslOptions]);
+            
+            // Appliquer les options au stream existant
+            $this->log("Applying SSL context options directly to stream", 2);
+            if (!stream_context_set_option($stream, ['ssl' => $sslOptions])) {
+                $this->log("Warning: Failed to set SSL context options on stream", 0, 'warning');
+            }
+            
+            // Pour déboguer
+            $this->log("SSL Context Options: " . json_encode($sslOptions), 2);
+            
+            // Essayer d'activer le cryptage
+            $this->log("Enabling crypto on stream with method: $cryptoMethod", 2);
             if (!stream_socket_enable_crypto($stream, true, $cryptoMethod)) {
                 $errorMessage = error_get_last()['message'] ?? 'Unknown error';
+                
+                // Récupérer les erreurs OpenSSL
+                $opensslErrors = [];
+                if (function_exists('openssl_get_errors')) {
+                    while ($error = openssl_get_errors()) {
+                        $opensslErrors[] = openssl_error_string();
+                    }
+                }
+                
+                if (!empty($opensslErrors)) {
+                    $errorMessage .= " - OpenSSL: " . implode(", ", $opensslErrors);
+                }
+                
                 $this->log("TLS error: $errorMessage", 0, 'error');
                 throw new \RuntimeException("Failed to enable TLS encryption: $errorMessage");
             }
@@ -788,6 +1036,31 @@ class SmtpServerService
             $this->clientStates[$clientId]['data'] = '';
             
             $this->log("Successfully upgraded client $clientId to TLS", 1);
+            
+            // Vérifier que le client est toujours connecté après la mise à niveau
+            // Nous devons utiliser le stream maintenant que TLS est activé
+            $streamInfo = stream_get_meta_data($stream);
+            $this->log("Stream info after TLS upgrade: " . json_encode($streamInfo), 1);
+            
+            if ($streamInfo['eof']) {
+                $this->log("Stream is at EOF after TLS upgrade, client probably disconnected", 0, 'error');
+            } else {
+                $this->log("Stream is still connected after TLS upgrade", 1);
+                
+                // Stocker le stream pour l'utiliser ultérieurement
+                // Nous devons communiquer via le stream au lieu du socket maintenant que TLS est actif
+                $this->clientStreams[$clientId] = $stream;
+                
+                // Envoyer un message au client pour confirmer que la connexion est toujours active
+                $confirmMsg = "220 TLS connection established, ready for EHLO\r\n";
+                $result = @fwrite($stream, $confirmMsg);
+                
+                if ($result === false) {
+                    $this->log("Failed to write confirmation after TLS", 0, 'error');
+                } else {
+                    $this->log("Sent confirmation message after TLS upgrade: $confirmMsg", 1);
+                }
+            }
             
         } catch (\Exception $e) {
             $this->log("Error upgrading to TLS: " . $e->getMessage(), 0, 'error');
