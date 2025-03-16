@@ -224,6 +224,10 @@ class SmtpServerService
             // Check if connection was closed or error occurred
             if ($bytes === 0 || $bytes === false) {
                 // Connection closed or error
+                $error = socket_last_error($clientSocket);
+                $errorMsg = $error ? socket_strerror($error) : 'Unknown error';
+                $clientState = isset($this->clientStates[$clientId]) ? json_encode($this->clientStates[$clientId]) : 'unknown';
+                $this->log("Client disconnection detected: bytes=$bytes, error=$errorMsg, state=$clientState", 1, 'warning');
                 $this->disconnectClient($clientId);
                 continue;
             }
@@ -403,13 +407,27 @@ class SmtpServerService
     private function disconnectClient(string $clientId): void
     {
         if (isset($this->clients[$clientId])) {
+            // Get information before disconnect for logging
+            $ip = $this->clientStates[$clientId]['ip'] ?? 'unknown';
+            $tls = isset($this->clientStates[$clientId]['tls']) ? ($this->clientStates[$clientId]['tls'] ? 'Yes' : 'No') : 'unknown';
+            $upgradeTls = isset($this->clientStates[$clientId]['upgrade_to_tls']) ? ($this->clientStates[$clientId]['upgrade_to_tls'] ? 'Yes' : 'No') : 'unknown';
+            $state = $this->clientStates[$clientId]['state'] ?? 'unknown';
+            $lastActivity = isset($this->clientStates[$clientId]['last_activity']) ? (time() - $this->clientStates[$clientId]['last_activity']) . 's ago' : 'unknown';
+            
+            // Get socket error if any
+            $error = @socket_last_error($this->clients[$clientId]);
+            $errorMsg = $error ? socket_strerror($error) : 'None';
+            
+            // Close the socket
             \socket_close($this->clients[$clientId]);
+            
+            // Log detailed disconnect information
+            $this->log("Client disconnected: $ip (ID: $clientId)", 1);
+            $this->log("Disconnect details - TLS: $tls, Upgrade TLS: $upgradeTls, State: $state, Last activity: $lastActivity, Socket error: $errorMsg", 1);
+            
+            // Clean up resources
             unset($this->clients[$clientId]);
             unset($this->clientBuffers[$clientId]);
-            
-            $ip = $this->clientStates[$clientId]['ip'] ?? 'unknown';
-            $this->log("Client disconnected: $ip (ID: $clientId)", 1);
-            
             unset($this->clientStates[$clientId]);
         }
     }
@@ -694,13 +712,35 @@ class SmtpServerService
             // No need to set options again, just use the existing stream
             
             // Support multiple TLS protocol versions for better compatibility
-            $cryptoMethod = STREAM_CRYPTO_METHOD_TLS_SERVER;
+            // Check available crypto methods
+            $this->log("Available TLS constants: " . implode(", ", array_filter(get_defined_constants(), function($key) {
+                return strpos($key, 'STREAM_CRYPTO_METHOD_') === 0;
+            }, ARRAY_FILTER_USE_KEY)), 2);
+            
+            // Initialize with all possible methods
+            $cryptoMethod = 0;
+            
+            // Use modern methods if available
+            if (defined('STREAM_CRYPTO_METHOD_TLSv1_3_SERVER')) {
+                $cryptoMethod |= STREAM_CRYPTO_METHOD_TLSv1_3_SERVER;
+                $this->log("Added TLSv1.3 server support", 2);
+            }
             if (defined('STREAM_CRYPTO_METHOD_TLSv1_2_SERVER')) {
                 $cryptoMethod |= STREAM_CRYPTO_METHOD_TLSv1_2_SERVER;
+                $this->log("Added TLSv1.2 server support", 2);
             }
             if (defined('STREAM_CRYPTO_METHOD_TLSv1_1_SERVER')) {
                 $cryptoMethod |= STREAM_CRYPTO_METHOD_TLSv1_1_SERVER;
+                $this->log("Added TLSv1.1 server support", 2);
             }
+            
+            // Fallback to basic TLS if no specific versions are available
+            if ($cryptoMethod === 0) {
+                $cryptoMethod = STREAM_CRYPTO_METHOD_TLS_SERVER;
+                $this->log("Using fallback TLS server support", 2);
+            }
+            
+            $this->log("Final crypto method value: $cryptoMethod", 2);
             
             $this->log("Attempting TLS handshake with client $clientId", 2);
             if (!stream_socket_enable_crypto($stream, true, $cryptoMethod)) {
@@ -732,6 +772,23 @@ class SmtpServerService
             
         } catch (\Exception $e) {
             $this->log("Error upgrading to TLS: " . $e->getMessage(), 0, 'error');
+            
+            // Get the last PHP error for more details
+            $lastError = error_get_last();
+            if ($lastError) {
+                $this->log("Last PHP error during TLS upgrade: " . json_encode($lastError), 0, 'error');
+            }
+            
+            // Log more info about the client state
+            if (isset($this->clientStates[$clientId])) {
+                $this->log("Client state before disconnect: " . json_encode($this->clientStates[$clientId]), 0, 'error');
+            }
+            
+            // Check what's in the client buffer
+            if (isset($this->clientBuffers[$clientId])) {
+                $this->log("Client buffer content: " . bin2hex($this->clientBuffers[$clientId]), 0, 'error');
+            }
+            
             $this->disconnectClient($clientId);
         }
     }
