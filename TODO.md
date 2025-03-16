@@ -13,11 +13,11 @@
 - [D] Implémenter le service d'écoute socket sur le port 25
 - [ ] Gérer les connexions entrantes et les timeouts
 - [D] Implémenter le dialogue SMTP de base:
-  - [ ] Commande HELO/EHLO
-  - [ ] Commande MAIL FROM
-  - [ ] Commande RCPT TO
-  - [ ] Commande DATA
-  - [ ] Commande QUIT
+  - [D] Commande HELO/EHLO
+  - [D] Commande MAIL FROM
+  - [D] Commande RCPT TO
+  - [D] Commande DATA
+  - [D] Commande QUIT
 - [ ] Gérer les erreurs et les cas particuliers du protocole
 - [ ] Mettre en place un système de redémarrage automatique en cas d'erreur
 
@@ -34,10 +34,10 @@
 
 ## Stockage
 
-- [ ] Concevoir la structure de stockage des emails
-- [ ] Implémenter le service de stockage:
-  - [ ] Stockage sous forme de fichiers .eml
-  - [ ] Organisation par date/destinataire
+- [D] Concevoir la structure de stockage des emails
+- [D] Implémenter le service de stockage:
+  - [D] Stockage sous forme de fichiers .eml
+  - [D] Organisation par destinataire/date.eml
 - [ ] Créer une commande pour lister les emails stockés
 - [ ] Ajouter une option de purge automatique des anciens emails
 
