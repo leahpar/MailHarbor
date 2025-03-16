@@ -221,14 +221,32 @@ class SmtpServerService
             $buffer = '';
             $bytes = @\socket_recv($clientSocket, $buffer, 1024, 0);
             
-            // Check if connection was closed or error occurred
-            if ($bytes === 0 || $bytes === false) {
-                // Connection closed or error
-                $error = socket_last_error($clientSocket);
-                $errorMsg = $error ? socket_strerror($error) : 'Unknown error';
+            // Get the error code for better diagnosis
+            $error = socket_last_error($clientSocket);
+            $errorMsg = $error ? socket_strerror($error) : 'None';
+            
+            // EAGAIN/EWOULDBLOCK (11/140) means no data available on non-blocking socket
+            // This is not an error, just means we should try again later
+            $eagain = defined('SOCKET_EAGAIN') ? SOCKET_EAGAIN : 11;
+            $ewouldblock = defined('SOCKET_EWOULDBLOCK') ? SOCKET_EWOULDBLOCK : 140;
+            
+            // Check if connection was closed or a real error occurred
+            if ($bytes === 0) {
+                // Connection closed gracefully
                 $clientState = isset($this->clientStates[$clientId]) ? json_encode($this->clientStates[$clientId]) : 'unknown';
-                $this->log("Client disconnection detected: bytes=$bytes, error=$errorMsg, state=$clientState", 1, 'warning');
+                $this->log("Client disconnection detected (graceful close): bytes=$bytes, error=$errorMsg, state=$clientState", 1, 'warning');
                 $this->disconnectClient($clientId);
+                continue;
+            } else if ($bytes === false && $error !== $eagain && $error !== $ewouldblock) {
+                // Real error (not just "would block")
+                $clientState = isset($this->clientStates[$clientId]) ? json_encode($this->clientStates[$clientId]) : 'unknown';
+                $this->log("Client disconnection detected (error): bytes=$bytes, error=$errorMsg ($error), state=$clientState", 1, 'warning');
+                $this->disconnectClient($clientId);
+                continue;
+            } else if ($bytes === false) {
+                // No data available on non-blocking socket (not an error)
+                // Reset the socket error status
+                socket_clear_error($clientSocket);
                 continue;
             }
             
@@ -662,7 +680,8 @@ class SmtpServerService
                 'allow_self_signed' => true,
                 'disable_compression' => true,
                 'SNI_enabled' => true,
-                'ciphers' => 'HIGH:!SSLv2:!SSLv3:!TLSv1.0',
+                // Utilise des suites de chiffrement plus larges pour meilleure compatibilité
+                'ciphers' => 'ALL:!ADH:!NULL:!eNULL:!LOW:!EXP:!RC4:!MD5:@STRENGTH',
             ]
         ];
         
