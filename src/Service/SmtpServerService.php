@@ -318,16 +318,45 @@ class SmtpServerService
                             continue;
                         }
                         
-                        // Check if we're in DATA mode and this is not the end marker
-                        if ($this->clientStates[$clientId]['state'] === 'data' && $command !== '.') {
-                            // In DATA mode, just accumulate the data
-                            $this->clientStates[$clientId]['data'] .= $command . "\r\n";
-                            continue;
+                        // Special case: detect RSET or QUIT in DATA mode and exit DATA mode
+                        if ($this->clientStates[$clientId]['state'] === 'data') {
+                            $upperCommand = strtoupper($command);
+                            
+                            // Si on reçoit RSET ou QUIT en mode DATA, on sort du mode DATA et on traite comme une commande normale
+                            if ($upperCommand === 'RSET' || $upperCommand === 'QUIT') {
+                                $this->log("Detected command '$upperCommand' in DATA mode, exiting DATA mode", 1);
+                                $this->clientStates[$clientId]['state'] = 'command';
+                                $this->clientStates[$clientId]['data'] = '';
+                            }
+                            // Check if this is the end marker for DATA mode
+                            else if ($command === '.') {
+                                // Continue to command processing (end of DATA)
+                            }
+                            // Otherwise, it's just data
+                            else {
+                                // In DATA mode, just accumulate the data
+                                $this->clientStates[$clientId]['data'] .= $command . "\r\n";
+                                continue;
+                            }
                         }
                         
                         // Process SMTP command
-                        $this->log("Received from client $clientId: $command", 2);
+                        $cmdId = uniqid('cmd_', true);
+                        $this->log("[$cmdId] Received from client $clientId: $command", 1);
+                        
+                        // Vérifier l'état du client avant le traitement de la commande
+                        $stateBeforeCmd = isset($this->clientStates[$clientId]['state']) ? $this->clientStates[$clientId]['state'] : 'unknown';
+                        $this->log("[$cmdId] Client state before processing: $stateBeforeCmd", 1);
+                        
                         $response = $this->processSmtpCommand($clientId, $command);
+                        
+                        // Vérifier l'état du client après le traitement de la commande
+                        $stateAfterCmd = isset($this->clientStates[$clientId]['state']) ? $this->clientStates[$clientId]['state'] : 'unknown';
+                        $this->log("[$cmdId] Client state after processing: $stateAfterCmd", 1);
+                        
+                        // Débogage supplémentaire de la réponse générée
+                        $responseDebug = str_replace(["\r", "\n"], ["\\r", "\\n"], $response);
+                        $this->log("[$cmdId] Generated response for '$command': '$responseDebug'", 1);
                         
                         // Envoyer la réponse de manière appropriée selon TLS ou non
                         if ($usingTls && isset($this->clientStreams[$clientId])) {
@@ -348,7 +377,7 @@ class SmtpServerService
                             }
                         }
                         
-                        $this->log("Sent to client $clientId: $response", 2);
+                        $this->log("[$cmdId] Sent to client $clientId: $response", 2);
                         
                         // Check if we need to handle TLS upgrade
                         if (isset($this->clientStates[$clientId]['upgrade_to_tls']) && 
@@ -397,6 +426,7 @@ class SmtpServerService
             $response = "250-MailHarbor\r\n";
             $response .= "250-SIZE 10240000\r\n"; // 10MB max message size
             $response .= "250-8BITMIME\r\n";
+            $response .= "250-PIPELINING\r\n";  // Support for command pipelining 
             
             // Only advertise STARTTLS if TLS is enabled and we're not already in TLS mode
             if ($this->config['tls_enabled'] && !$this->clientStates[$clientId]['tls']) {
@@ -412,7 +442,7 @@ class SmtpServerService
             if (!empty($hostname)) {
                 $this->clientStates[$clientId]['hostname'] = trim($hostname);
             }
-            return "250 MailHarbor\r\n";
+            return "250 OK\r\n";
         }
         
         // Handle STARTTLS command
@@ -425,6 +455,12 @@ class SmtpServerService
         if (strpos($commandUpper, 'MAIL FROM:') === 0) {
             $sender = $this->extractEmail($command, 'MAIL FROM:');
             $this->clientStates[$clientId]['mail_from'] = $sender;
+            
+            // Réinitialiser les données de l'email en cours et s'assurer que nous sommes en mode command
+            $this->clientStates[$clientId]['rcpt_to'] = [];
+            $this->clientStates[$clientId]['data'] = '';
+            $this->clientStates[$clientId]['state'] = 'command';
+            
             return "250 OK\r\n";
         }
         
@@ -438,11 +474,39 @@ class SmtpServerService
         }
         
         if (strpos($commandUpper, 'DATA') === 0) {
+            // Vérifier que nous avons un expéditeur et au moins un destinataire
+            if (empty($this->clientStates[$clientId]['mail_from'])) {
+                return "503 Bad sequence of commands: MAIL command required\r\n";
+            }
+            
+            if (empty($this->clientStates[$clientId]['rcpt_to'])) {
+                return "503 Bad sequence of commands: RCPT command required\r\n";
+            }
+            
+            // Débogage pour vérifier l'état avant/après changement
+            $this->log("Changing client state to DATA mode (was: {$this->clientStates[$clientId]['state']})", 1);
             $this->clientStates[$clientId]['state'] = 'data';
+            
+            // Forcer un flush du tampon pour s'assurer que la réponse est envoyée immédiatement
+            if (isset($this->clientStreams[$clientId])) {
+                stream_set_blocking($this->clientStreams[$clientId], true);
+                $this->log("Set stream to blocking mode for DATA command response", 2);
+            }
+            
             return "354 Start mail input; end with <CRLF>.<CRLF>\r\n";
         }
         
-        // Handle DATA state separately
+        // Handle RSET command (reset the transaction)
+        if (strpos($commandUpper, 'RSET') === 0) {
+            // Reset mail transaction
+            $this->clientStates[$clientId]['mail_from'] = '';
+            $this->clientStates[$clientId]['rcpt_to'] = [];
+            $this->clientStates[$clientId]['data'] = '';
+            $this->clientStates[$clientId]['state'] = 'command';
+            return "250 OK\r\n";
+        }
+        
+        // Handle DATA state separately - dot on a line by itself marks end of data
         if ($this->clientStates[$clientId]['state'] === 'data' && $command === '.') {
             $this->clientStates[$clientId]['state'] = 'command';
             
@@ -1061,8 +1125,11 @@ class SmtpServerService
                 // Nous devons communiquer via le stream au lieu du socket maintenant que TLS est actif
                 $this->clientStreams[$clientId] = $stream;
                 
-                // Envoyer un message au client pour confirmer que la connexion est toujours active
-                $confirmMsg = "220 TLS connection established, ready for EHLO\r\n";
+                // Après TLS, le client va envoyer un nouveau EHLO
+                // Un message de confirmation n'est pas nécessaire ici
+                // PHPMailer s'attend à recevoir le prochain message après une commande de sa part
+                /*
+                $confirmMsg = "250 TLS connection established\r\n";
                 $result = @fwrite($stream, $confirmMsg);
                 
                 if ($result === false) {
@@ -1070,6 +1137,8 @@ class SmtpServerService
                 } else {
                     $this->log("Sent confirmation message after TLS upgrade: $confirmMsg", 1);
                 }
+                */
+                $this->log("TLS established successfully, waiting for client EHLO", 1);
             }
             
         } catch (\Exception $e) {
