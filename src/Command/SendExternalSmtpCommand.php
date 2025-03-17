@@ -115,6 +115,18 @@ class SendExternalSmtpCommand extends Command
             $mail->Timeout = 60; // Timeout in seconds
             $mail->SMTPKeepAlive = true; // Keep connection open after sending
             
+            // Disable SMTP auto TLS, we'll control TLS explicitly
+            $mail->SMTPAutoTLS = false;
+            
+            // Ajout d'options pour améliorer la compatibilité
+            $mail->SMTPOptions = [
+                'ssl' => [
+                    'verify_peer' => false,
+                    'verify_peer_name' => false,
+                    'allow_self_signed' => true
+                ]
+            ];
+            
             // Set up SMTP
             $io->text('Setting up SMTP connection...');
             $mail->isSMTP();
