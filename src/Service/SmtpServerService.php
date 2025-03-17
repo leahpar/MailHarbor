@@ -21,6 +21,7 @@ class SmtpServerService
         'timeout' => 30,
         'debug' => 0, // 0 = minimal, 1 = normal, 2 = verbose, 3 = debug
         'tls_enabled' => true,
+        'tls_required' => false, // Si true, force le client à utiliser TLS
         'tls_cert_file' => __DIR__ . '/../../var/certs/cert.pem',
         'tls_key_file' => __DIR__ . '/../../var/certs/privkey.pem',
         'tls_passphrase' => null,
@@ -453,6 +454,11 @@ class SmtpServerService
         }
         
         if (strpos($commandUpper, 'MAIL FROM:') === 0) {
+            // Vérifier que TLS est actif si c'est obligatoire
+            if ($this->config['tls_required'] && !$this->clientStates[$clientId]['tls']) {
+                return "530 Must issue a STARTTLS command first\r\n";
+            }
+            
             $sender = $this->extractEmail($command, 'MAIL FROM:');
             $this->clientStates[$clientId]['mail_from'] = $sender;
             
@@ -465,6 +471,11 @@ class SmtpServerService
         }
         
         if (strpos($commandUpper, 'RCPT TO:') === 0) {
+            // Vérifier que TLS est actif si c'est obligatoire
+            if ($this->config['tls_required'] && !$this->clientStates[$clientId]['tls']) {
+                return "530 Must issue a STARTTLS command first\r\n";
+            }
+            
             $recipient = $this->extractEmail($command, 'RCPT TO:');
             if (!isset($this->clientStates[$clientId]['rcpt_to'])) {
                 $this->clientStates[$clientId]['rcpt_to'] = [];
@@ -474,6 +485,11 @@ class SmtpServerService
         }
         
         if (strpos($commandUpper, 'DATA') === 0) {
+            // Vérifier que TLS est actif si c'est obligatoire
+            if ($this->config['tls_required'] && !$this->clientStates[$clientId]['tls']) {
+                return "530 Must issue a STARTTLS command first\r\n";
+            }
+            
             // Vérifier que nous avons un expéditeur et au moins un destinataire
             if (empty($this->clientStates[$clientId]['mail_from'])) {
                 return "503 Bad sequence of commands: MAIL command required\r\n";

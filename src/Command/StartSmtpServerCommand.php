@@ -33,6 +33,7 @@ class StartSmtpServerCommand extends Command
             ->addOption('max-connections', 'm', InputOption::VALUE_OPTIONAL, 'Maximum number of simultaneous connections', 10)
             ->addOption('debug', 'd', InputOption::VALUE_OPTIONAL, 'Debug level (0-3)', 1)
             ->addOption('tls', null, InputOption::VALUE_OPTIONAL, 'Enable TLS support (0=disabled, 1=enabled)', 1)
+            ->addOption('tls-required', null, InputOption::VALUE_OPTIONAL, 'Require TLS for MAIL FROM (0=optional, 1=required)', 0)
             ->addOption('tls-cert', null, InputOption::VALUE_OPTIONAL, 'Path to TLS certificate file', __DIR__ . '/../../var/certs/cert.pem')
             ->addOption('tls-key', null, InputOption::VALUE_OPTIONAL, 'Path to TLS key file', __DIR__ . '/../../var/certs/privkey.pem')
             ->addOption('tls-passphrase', null, InputOption::VALUE_OPTIONAL, 'TLS certificate passphrase if needed');
@@ -49,6 +50,7 @@ class StartSmtpServerCommand extends Command
             'maxConnections' => (int) $input->getOption('max-connections'),
             'debug' => (int) $input->getOption('debug'),
             'tls_enabled' => (bool) (int) $input->getOption('tls'),
+            'tls_required' => (bool) (int) $input->getOption('tls-required'),
             'tls_cert_file' => $input->getOption('tls-cert'),
             'tls_key_file' => $input->getOption('tls-key'),
             'tls_passphrase' => $input->getOption('tls-passphrase'),
@@ -60,6 +62,8 @@ class StartSmtpServerCommand extends Command
         $io->title('MailHarbor SMTP Server');
         $io->text([
             'Starting SMTP server on ' . $config['host'] . ':' . $config['port'],
+            'TLS enabled: ' . ($config['tls_enabled'] ? 'Yes' : 'No'),
+            'TLS required: ' . ($config['tls_required'] ? 'Yes' : 'No'),
         ]);
 
         if ($this->smtpServer->start($config)) {
